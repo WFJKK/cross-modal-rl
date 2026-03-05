@@ -1,6 +1,8 @@
-# Synthetic Dataset Generation for VLM Cross-Modal Reasoning
+# Synthetic Dataset Generation for VLM Engineering Documentation QA
 
 **Author:** Joshua Kames-King
+
+**Built with:** Claude Code (Anthropic) was used extensively as a development tool throughout this project. The dataset is designed for fine-tuning Mistral's vision-language models.
 
 ---
 
@@ -27,38 +29,10 @@ Each example requires the model to:
 2. **Extract measurements** from a technical drawing (image)
 3. **Apply rules to measurements** and determine compliance (reasoning)
 
-## Project Structure
-```
-VLMRLSFT/
-├── sampler.py               # Parameter sampler (constructive placement)
-├── spec_generator.py        # Specification document generator
-├── question_generator.py    # Q/A pair + reasoning chain generator
-├── renderer.py              # Technical drawing renderer (matplotlib)
-├── orchestrator.py          # Pipeline orchestrator (dataset generation)
-├── evaluate.py              # Evaluation: run predictions, score, compare
-├── config.json              # Default orchestrator config
-├── config_train.json        # Training dataset config (3000 examples, seed 0)
-├── config_test.json         # Test dataset config (200 examples, seed 9999)
-├── training/
-│   ├── data_loader.py       # Data loading, splitting, formatting for SFT
-│   └── trainministral8b.py  # LoRA fine-tuning script (Ministral 3 8B)
-├── data/
-│   ├── train/               # Generated training data
-│   │   ├── dataset.jsonl
-│   │   ├── stats.json
-│   │   └── images/
-│   └── test/                # Generated test/eval data
-│       ├── dataset.jsonl
-│       ├── stats.json
-│       └── images/
-└── results/
-    └── finetuned/
-        └── ministral-8b-lora/  # Saved LoRA adapter weights
-```
-
 ## Architecture
 
 The pipeline has five stages:
+
 ```
 sampler.py → spec_generator.py → question_generator.py → renderer.py → orchestrator.py
 ```
@@ -123,68 +97,118 @@ The annotation level controls how hard it is to extract measurements from the im
 
 ### 5. Pipeline Orchestrator (`orchestrator.py`)
 
-Generates balanced datasets with weighted distribution across:
-- 3 rule complexities × 3 annotation levels × 4 violation counts
+Generates balanced datasets with even distribution across:
+- 3 rule complexities × 3 annotation levels × 4 violation counts = 36 combinations
 
-Distribution weights are configured via JSON config files. Outputs per dataset:
+Outputs:
 - `dataset.jsonl` — one record per example with image path, spec text, all QA pairs, and full metadata
 - `images/` — PNG technical drawings
 - `stats.json` — dataset statistics
 
+## Design Decisions
+
+### Why constructive sampling?
+
+Random hole placement with post-hoc compliance checking leads to either: (a) most examples being fully compliant (which is not useful), or (b) messy multi-rule violations that make ground truth ambiguous. Constructive sampling guarantees exact control over the compliance state.
+
+### Why three annotation levels?
+
+This creates a natural curriculum:
+- **Full annotation** teaches the reasoning pattern: parse rule → extract value → compute → conclude
+- **Minimal annotation** forces visual inference: the model already knows the reasoning, but must get numbers from geometry instead of labels, which might be one of the failure modes as described in the motivation section
+- The same questions and answers apply regardless — only the information source changes
+
+### Why exhaustive hole × rule questions?
+
+Each example checks every hole against every rule. This teaches systematic compliance checking rather than cherry-picking. A model trained on incomplete checks would learn to be incomplete.
+
+### Avoiding data contamination
+
+The data teaches reasoning skills, not memorizable facts, by construction:
+- Every example has unique plate dimensions, hole positions, and rule parameters
+- Rule order is shuffled in specs
+- Material-class mapping is consistent but tolerance values vary per example
+- The model cannot memorize "Aluminum = ±0.5mm" because the tolerance for each class changes between examples
+
+## Evaluation
+
+The evaluation script (`evaluate.py`) scores model predictions against ground truth on five metrics. There are two directions of failure: reasoning and quantitative spatial inference ability, and models may have different behaviours with regard to these two dimensions.
+
+### 1. Compliance Classification Accuracy
+Binary Yes/No for each hole × rule pair. Broken down by:
+- **Annotation level**: Does accuracy drop from full → partial → minimal? This gap measures quantitative spatial inference ability.
+- **Rule complexity**: simple → multi_rule → conditional. Here we are probing multi-modal reasoning.
+- **Rule type**: tolerance vs edge distance vs spacing vs bolt
+- **Answer balance**: accuracy on Yes vs No answers (detects bias)
+
+### 2. Full Audit F1
+The model produces a violation list, ground truth is a list. Precision catches hallucinated violations, recall catches missed ones. F1 combines both.
+
+### 3. Measurement Extraction Error
+Absolute error in mm between predicted and true distances. Directly measures spatial information extraction from images.
+
+### 4. Rule Understanding Accuracy
+For rule_selection questions — can the model correctly parse the spec to find applicable parameters?
+
+### 5. Counterfactual Accuracy
+Can the model compute correct thresholds for compliance? Tests backward reasoning.
+
+### Running Evaluation
+
+```bash
+# Generate predictions (one JSONL line per question)
+# Format: {"example_id": "EX-0000", "question_index": 0, "prediction": "Yes"}
+
+# Score predictions
+python evaluate.py --predictions predictions.jsonl --ground_truth dataset/dataset.jsonl
+
+# Test with mock models
+python test_evaluate.py
+```
+
 ## Usage
 
 ### Setup
+
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
-### Generate Datasets
+### Sample Dataset
 
-The pipeline uses JSON config files to control dataset size, distribution weights, and output location. Two configs are provided:
+A pre-generated sample of 200 examples (~3,500 questions) is included in `dataset/`. This contains:
+
+- `dataset.jsonl` — one JSON record per example, each with the image path, full specification text, all question-answer pairs with reasoning chains, and metadata (rule complexity, annotation level, violation count, hole positions, rule parameters)
+- `images/` — 200 PNG technical drawings at varying annotation levels (full, partial, minimal)
+- `stats.json` — summary statistics showing the distribution across complexities, annotation levels, violation counts, and question types
+
+This sample is ready to use for fine-tuning or evaluation without running the pipeline. To regenerate or produce a larger dataset:
+
+### Generate Dataset
+
 ```bash
-# Generate training set (3000 examples → data/train/)
-uv run python orchestrator.py --config config_train.json
-
-# Generate test set (200 examples → data/test/)
-uv run python orchestrator.py --config config_test.json
-
-# Default config (1000 examples → dataset/)
+# Default: 200 examples in ./dataset/
 uv run python orchestrator.py
 
-# Override with custom config
-uv run python orchestrator.py --config my_config.json
+# Custom
+uv run python orchestrator.py --num 500 --output ./my_dataset --seed 0
 ```
-
-**Config format** (see `config_train.json`, `config_test.json`):
-```json
-{
-  "dataset": { "num_examples": 3000, "seed": 0 },
-  "distribution": {
-    "complexity_weights": { "simple": 0.3, "multi_rule": 0.3, "conditional": 0.4 },
-    "annotation_weights": { "full": 0.33, "partial": 0.33, "minimal": 0.34 },
-    "violation_counts": [1, 2, 3, 4]
-  },
-  "violations": { "allow_multi_violation": false, "spacing_oversample_weight": 2.0 },
-  "sampling": { "max_retries": 30, "max_placement_attempts": 400 },
-  "output": { "directory": "./data/train" }
-}
-```
-
-The training config uses `violation_counts: [1, 2, 3, 4]` (every example has at least one violation), while the test config uses `[0, 1, 2, 3]` (includes fully compliant examples for realistic evaluation).
 
 ### Output Structure
+
 ```
-data/train/                    data/test/
-├── dataset.jsonl              ├── dataset.jsonl
-├── stats.json                 ├── stats.json
-└── images/                    └── images/
-    ├── EX-0000.png                ├── EX-0000.png
-    ├── EX-0001.png                ├── EX-0001.png
-    └── ...                        └── ...
+dataset/
+  dataset.jsonl      # All examples with QA pairs and metadata
+  stats.json         # Dataset statistics
+  images/
+    EX-0000.png
+    EX-0001.png
+    ...
 ```
 
 ### JSONL Record Format
+
 ```json
 {
   "example_id": "EX-0000",
@@ -211,238 +235,6 @@ data/train/                    data/test/
 }
 ```
 
-## Evaluation
-
-The evaluation script (`evaluate.py`) handles prediction generation, scoring, and model comparison via three subcommands.
-
-### Running Predictions
-```bash
-# Run a model against the test set
-uv run python evaluate.py run \
-    --model mistral-small-latest \
-    --dataset data/test/dataset.jsonl \
-    --output results/predictions_baseline.jsonl \
-    --provider mistral
-
-# Supported providers: mistral, openai, anthropic
-# Use --backend local for HuggingFace models (e.g. finetuned adapters)
-uv run python evaluate.py run \
-    --model results/finetuned/ministral-8b-lora \
-    --dataset data/test/dataset.jsonl \
-    --output results/predictions_finetuned.jsonl \
-    --backend local
-
-# Filter to specific question types
-uv run python evaluate.py run \
-    --model mistral-small-latest \
-    --dataset data/test/dataset.jsonl \
-    --types per_component_compliance full_audit \
-    --max-examples 50
-```
-
-Predictions support resume — rerunning the same command skips already-completed questions.
-
-### Scoring
-```bash
-# Score predictions against ground truth
-uv run python evaluate.py score \
-    --predictions results/predictions_baseline.jsonl \
-    --results results/results_baseline.json \
-    --errors results/errors_baseline.jsonl
-```
-
-This produces:
-- `results.json` — structured scores across all metrics and breakdowns
-- `errors.jsonl` — every incorrect prediction with expected vs actual for error analysis
-- Console report with all metrics
-
-### Comparing Models
-```bash
-# Compare baseline vs finetuned
-uv run python evaluate.py compare \
-    --a results/results_baseline.json \
-    --b results/results_finetuned.json \
-    --label-a "Baseline" \
-    --label-b "Finetuned"
-```
-
-Prints a side-by-side comparison with deltas across all metrics, including the 3×3 annotation × complexity grid.
-
-### Metrics
-
-1. **Compliance classification accuracy**: Binary Yes/No for each hole × rule pair, broken down by annotation level (full → partial → minimal gap measures spatial inference ability), rule complexity (simple → conditional gap measures multi-hop reasoning), rule type, and answer balance (Yes vs No bias detection).
-
-2. **Full audit F1**: Precision catches hallucinated violations, recall catches missed ones.
-
-3. **Measurement extraction MAE**: Absolute error in mm between predicted and true distances. Directly measures spatial information extraction.
-
-4. **Rule understanding accuracy**: Can the model correctly parse conditional specs to find applicable parameters?
-
-5. **Counterfactual MAE**: Can the model compute correct thresholds for compliance? Tests backward reasoning.
-
-The 3×3 grid (annotation level × rule complexity) is the key diagnostic: it decomposes model failures into spatial inference deficits (column differences) versus reasoning deficits (row differences).
-
-## Baseline Results
-
-We evaluated two Mistral models on the generated test set using `evaluate.py`:
-
-### Pixtral Large (30 examples, 681 predictions)
-
-**Compliance accuracy: 135/488 = 27.7%**
-
-| Annotation | Accuracy | | Complexity  | Accuracy |
-|------------|----------|-|-------------|----------|
-| Full       | 40/133 = 30.1% | | Simple      | 34/126 = 27.0% |
-| Partial    | 50/197 = 25.4% | | Multi-rule  | 39/170 = 22.9% |
-| Minimal    | 45/158 = 28.5% | | Conditional | 62/192 = 32.3% |
-
-**Answer bias:** Yes 23.2%, No 67.3% — strong "No" bias. The model defaults to predicting non-compliance, inflating its score on actual violations but missing most compliant cases.
-
-**3×3 grid (annotation × complexity):**
-
-|           | Simple | Multi-rule | Conditional |
-|-----------|--------|------------|-------------|
-| Full      | 6/36 = 16.7% | 15/48 = 31.3% | 19/49 = 38.8% |
-| Partial   | 10/30 = 33.3% | 14/80 = 17.5% | 26/87 = 29.9% |
-| Minimal   | 18/60 = 30.0% | 10/42 = 23.8% | 17/56 = 30.4% |
-
-**Other metrics:**
-- Measurement MAE: 28.2mm overall (diameter 2.2mm, edge distance 23.4mm, hole-to-hole 41.9mm, plate dims 45.5mm)
-- Audit F1: 0.259 (precision 26.4%, recall 58.6%)
-- Counterfactual MAE: 7.4mm
-- Rule selection: 0/6
-
-### Ministral 3 8B (3 examples, 69 predictions)
-
-**Compliance accuracy: 4/50 = 8.0%**
-
-**Answer bias:** Yes 0.0%, No 100.0% — extreme "No" bias. The model predicts non-compliance for virtually every question.
-
-**Other metrics:**
-- Measurement MAE: 6.2mm overall (diameter 0.03mm, edge distance 13.1mm, hole-to-hole 11.7mm, plate dims 0.0mm)
-- Audit F1: 0.274 (precision 21.4%, recall 88.9%)
-- Counterfactual MAE: 10.4mm
-
-### Interpretation
-
-Both models perform well below chance on the balanced binary compliance task, confirming that this dataset presents a genuine challenge for current VLMs.
-
-The dominant failure mode is a strong "No" bias — both models default to predicting non-compliance. This is particularly severe for Ministral 3 8B (8% accuracy, answering "No" to nearly everything), while Pixtral Large shows a milder version of the same pattern (27.7% overall). This bias likely stems from the models' tendency to err on the side of caution when uncertain about compliance.
-
-Pixtral Large's compliance breakdown shows relatively flat performance across annotation levels (25–30%) and complexity levels (23–32%), suggesting the model fails at a fundamental level before the difficulty gradient becomes the bottleneck. The flat annotation axis (no clear drop from full → minimal) implies the model cannot reliably extract measurements even when they are explicitly labeled in the image.
-
-Measurement extraction errors confirm this: while diameter readings from labeled annotations are reasonable (2.2mm MAE), spatial distances like hole-to-hole (41.9mm MAE) and plate dimensions (45.5mm MAE) are far off, indicating the models struggle with visual spatial reasoning even for basic geometric properties.
-
-These baselines establish the pre-training performance floor that fine-tuning aims to improve upon.
-
-## Training
-
-### Data Loading (`training/data_loader.py`)
-
-Prepares the generated dataset for SFT training:
-- Splits at the record level (all questions from one plate stay together, preventing data leakage)
-- Flattens records into individual examples (one per question)
-- Oversamples minority "No" compliance answers to balance the ~90/10 Yes/No imbalance
-- Formats as chat messages matching the evaluation prompt structure
-
-### Fine-tuning (`training/trainministral8b.py`)
-
-LoRA fine-tuning of Ministral 3 8B with HuggingFace TRL:
-```bash
-cd training
-
-# Default settings (3 epochs, LoRA r=64, 4-bit quantization)
-python trainministral8b.py \
-    --dataset ../data/train/dataset.jsonl \
-    --output ../results/finetuned/ministral-8b-lora
-
-# Custom hyperparameters
-python trainministral8b.py \
-    --dataset ../data/train/dataset.jsonl \
-    --output ../results/finetuned/ministral-8b-lora \
-    --epochs 5 --lr 1e-4 --batch-size 4 --lora-r 128 --lora-alpha 256
-
-# Full precision (needs more VRAM)
-python trainministral8b.py --no-4bit
-```
-
-**Requirements:**
-```bash
-pip install torch transformers peft trl bitsandbytes
-pip install git+https://github.com/huggingface/transformers.git  # latest for Ministral 3
-```
-
-**Configuration:**
-- LoRA targets: all attention projections + MLP layers (`q/k/v/o_proj`, `gate/up/down_proj`)
-- Quantization: 4-bit NF4 with double quantization (fits in 24 GB VRAM)
-- Optimiser: AdamW 8-bit with cosine LR schedule
-- Gradient checkpointing enabled for memory efficiency
-
-### End-to-End Workflow
-```bash
-# 1. Generate datasets
-uv run python orchestrator.py --config config_train.json
-uv run python orchestrator.py --config config_test.json
-
-# 2. Baseline evaluation
-uv run python evaluate.py run \
-    --model pixtral-large-latest --provider mistral \
-    --dataset data/test/dataset.jsonl \
-    --output results/predictions_baseline.jsonl
-uv run python evaluate.py score \
-    --predictions results/predictions_baseline.jsonl \
-    --results results/results_baseline.json
-
-# 3. Fine-tune
-cd training
-python trainministral8b.py --dataset ../data/train/dataset.jsonl
-cd ..
-
-# 4. Finetuned evaluation
-uv run python evaluate.py run \
-    --model results/finetuned/ministral-8b-lora --backend local \
-    --dataset data/test/dataset.jsonl \
-    --output results/predictions_finetuned.jsonl
-uv run python evaluate.py score \
-    --predictions results/predictions_finetuned.jsonl \
-    --results results/results_finetuned.json
-
-# 5. Compare
-uv run python evaluate.py compare \
-    --a results/results_baseline.json \
-    --b results/results_finetuned.json \
-    --label-a "Pixtral Large" --label-b "Finetuned"
-```
-
-## Design Decisions
-
-### Why constructive sampling?
-
-Random hole placement with post-hoc compliance checking leads to either: (a) most examples being fully compliant (which is not useful), or (b) messy multi-rule violations that make ground truth ambiguous. Constructive sampling guarantees exact control over the compliance state.
-
-### Why three annotation levels?
-
-This creates a natural curriculum:
-- **Full annotation** teaches the reasoning pattern: parse rule → extract value → compute → conclude
-- **Minimal annotation** forces visual inference: the model already knows the reasoning, but must get numbers from geometry instead of labels, which might be one of the failure modes as described in the motivation section
-- The same questions and answers apply regardless — only the information source changes
-
-### Why exhaustive hole × rule questions?
-
-Each example checks every hole against every rule. This teaches systematic compliance checking rather than cherry-picking. A model trained on incomplete checks would learn to be incomplete.
-
-### Why separate train/test configs?
-
-The training config (`config_train.json`) uses `violation_counts: [1, 2, 3, 4]` — every plate has at least one violation, maximising the density of informative examples. The test config (`config_test.json`) uses `[0, 1, 2, 3]` — including fully compliant plates for realistic evaluation. Different seeds (0 vs 9999) ensure no overlap between the two sets.
-
-### Avoiding data contamination
-
-The data teaches reasoning skills, not memorizable facts, by construction:
-- Every example has unique plate dimensions, hole positions, and rule parameters
-- Rule order is shuffled in specs
-- Material-class mapping is consistent but tolerance values vary per example
-- The model cannot memorize "Aluminum = ±0.5mm" because the tolerance for each class changes between examples
-
 ## Known Limitations & Future Work
 
 - **Spacing violations are underrepresented** (~5% of violations) due to geometric constraints in constructive placement. Improved from <1% by biasing placement toward plate interior, but still lower than other rule types.
@@ -458,15 +250,11 @@ Uses `uv` with `pyproject.toml` for dependency management.
 ### Code Quality
 
 - **Language:** Python 3.12
-- **Formatting:** Black (line length 88)
 - **Type hints:** All functions have comprehensive type annotations
-- **Docstrings:** Google-style on all public functions and classes
 - **Type checking:** Passes `pyright` in basic mode with 0 errors, 0 warnings
-- **Dependencies:** numpy, matplotlib (generation); torch, transformers, peft, trl (training)
+- **Dependencies:** numpy, matplotlib
+
 ```bash
 # Verify type checking
 uv run pyright sampler.py spec_generator.py question_generator.py renderer.py orchestrator.py evaluate.py
-
-# Verify formatting
-uv run black --check *.py training/*.py
 ```
