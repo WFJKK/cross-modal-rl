@@ -1,0 +1,33 @@
+{
+  "complexity": {
+    "simple": 62,
+    "multi_rule": 62,
+    "conditional": 73
+  },
+  "annotation": {
+    "full": 65,
+    "partial": 66,
+    "minimal": 66
+  },
+  "violations": {
+    "0": 38,
+    "1": 57,
+    "2": 58,
+    "3": 44
+  },
+  "total_questions": 4662,
+  "question_types": {
+    "per_component_compliance": 3445,
+    "full_audit": 197,
+    "measurement_diameter": 197,
+    "measurement_edge_distance": 197,
+    "measurement_hole_to_hole": 197,
+    "measurement_plate_dims": 197,
+    "rule_selection": 73,
+    "counterfactual": 159
+  },
+  "successes": 197,
+  "failures": 3,
+  "num_examples": 200,
+  "elapsed_seconds": 25.4
+}

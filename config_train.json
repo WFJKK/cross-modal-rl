@@ -1,0 +1,22 @@
+{
+  "dataset": {
+    "num_examples": 3000,
+    "seed": 0
+  },
+  "distribution": {
+    "complexity_weights": {"simple": 0.3, "multi_rule": 0.3, "conditional": 0.4},
+    "annotation_weights": {"full": 0.33, "partial": 0.33, "minimal": 0.34},
+    "violation_counts": [1, 2, 3, 4]
+  },
+  "violations": {
+    "allow_multi_violation": false,
+    "spacing_oversample_weight": 2.0
+  },
+  "sampling": {
+    "max_retries": 30,
+    "max_placement_attempts": 400
+  },
+  "output": {
+    "directory": "./data/train"
+  }
+}
