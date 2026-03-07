@@ -23,11 +23,15 @@ from __future__ import annotations
 import json
 import os
 import random
+import sys
 from typing import Any
 
 import torch
 from PIL import Image
 from transformers import AutoProcessor
+
+# Add parent directory to path so we can import evaluate.py
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from evaluate import SYSTEM_PROMPT, prompt_builder
 
@@ -195,7 +199,7 @@ class ComplianceDataset(torch.utils.data.Dataset):
 
 def make_collate_fn(
     processor: AutoProcessor,
-    max_seq_len: int = 2048,
+    max_seq_len: int = 4096,
 ):
     """Create a collate function for batching images and chat text.
 

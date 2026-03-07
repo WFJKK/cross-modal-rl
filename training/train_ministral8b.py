@@ -1,63 +1,85 @@
+"""Training script for VLM engineering compliance finetuning.
+
+Fine-tunes Ministral 3 8B (vision-language model) with LoRA adapters
+on the synthetic plate compliance dataset using HuggingFace TRL.
+
+The model is distributed as FP8 weights on HuggingFace. On GPUs with
+compute capability >= 8.9 (H100, 4090), FP8 runs natively. On older
+GPUs (A100), it auto-dequantizes to bf16. Either way, LoRA adapters
+are trained in bf16.
+
+Usage:
+    python train_ministral8b.py
+    python train_ministral8b.py --dataset ../data/train/dataset.jsonl
+    python train_ministral8b.py --epochs 3 --lr 2e-4 --batch-size 2
+
+Requirements:
+    pip install torch transformers peft trl bitsandbytes accelerate pillow
+"""
+
+from __future__ import annotations
+
 import argparse
 import os
+import sys
+from typing import Any
 
 import torch
+from peft import LoraConfig, TaskType
 from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
-    BitsAndBytesConfig,
+    FineGrainedFP8Config,
 )
-from peft import LoraConfig, TaskType
 from trl import SFTConfig, SFTTrainer
 
+# Add parent directory to path so we can import evaluate.py
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 from data_loader import (
-    load_records,
-    train_val_split,
-    flatten,
     ComplianceDataset,
+    flatten,
+    load_records,
     make_collate_fn,
+    train_val_split,
 )
 
 
 def load_model_and_processor(
     model_id: str,
-    use_4bit: bool = True,
 ) -> tuple[AutoModelForImageTextToText, AutoProcessor]:
     """Load the vision-language model and processor.
 
-    Supports 4-bit NF4 quantization via bitsandbytes for fitting
-    on a single GPU with reduced memory. Computation remains in
-    bfloat16 for numerical stability.
+    Uses FineGrainedFP8Config to load the model. On GPUs with compute
+    capability >= 8.9, FP8 runs natively (~9GB). On older GPUs, it
+    auto-dequantizes to bf16 (~17GB).
 
     Args:
         model_id: HuggingFace model ID.
-        use_4bit: Whether to load in 4-bit quantization.
 
     Returns:
         Tuple of (model, processor).
     """
-    if use_4bit:
-        quant_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
-    else:
-        quant_config = None
-
     model = AutoModelForImageTextToText.from_pretrained(
         model_id,
         device_map="auto",
-        torch_dtype=torch.bfloat16,
         attn_implementation="eager",
-        quantization_config=quant_config,
+        quantization_config=FineGrainedFP8Config(),
     )
 
     processor = AutoProcessor.from_pretrained(model_id)
     processor.tokenizer.padding_side = "right"
 
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.add_special_tokens(
+            {"pad_token": processor.tokenizer.eos_token}
+        )
+
+    print(f"Model loaded: {model_id}")
+    print(f"Parameters: {model.num_parameters():,}")
+
     return model, processor
+
 
 def get_lora_config(
     r: int = 64,
@@ -65,11 +87,14 @@ def get_lora_config(
     dropout: float = 0.05,
 ) -> LoraConfig:
     """Create LoRA configuration for Ministral 3.
-     
-    TODO: ADD VISION ENCODER BEING TARGETED ALSO CHANGE README REGARDING THAT PERHAPS
 
-    Targets all attention projections and MLP layers for maximum
-    adaptation capability while keeping trainable parameters small.
+    Targets all attention projections and MLP layers in both the
+    language model and vision encoder. Since the vision encoder uses
+    the same layer names (q_proj, k_proj, etc.), LoRA adapters are
+    applied to both automatically.
+
+    TODO: Consider separate LoRA ranks for vision vs language layers,
+    or freezing vision encoder for a language-only baseline.
 
     Args:
         r: LoRA rank. Higher = more capacity, more memory.
@@ -100,21 +125,26 @@ def get_lora_config(
 def get_training_config(
     output_dir: str,
     num_epochs: int = 1,
-    batch_size: int = 2,
-    grad_accum: int = 4,
+    batch_size: int = 1,
+    grad_accum: int = 8,
     learning_rate: float = 2e-4,
     warmup_steps: int = 50,
-    max_seq_len: int = 2048,
+    max_seq_len: int = 4096,
     save_strategy: str = "epoch",
     logging_steps: int = 10,
 ) -> SFTConfig:
     """Create SFT training configuration.
 
+    Uses cosine learning rate schedule with linear warmup, 8-bit AdamW
+    optimizer, bfloat16 mixed precision, and gradient checkpointing
+    to minimize memory usage.
+
     Args:
         output_dir: Where to save checkpoints.
         num_epochs: Number of training epochs.
         batch_size: Per-device batch size.
-        grad_accum: Gradient accumulation steps (effective batch = batch_size x grad_accum).
+        grad_accum: Gradient accumulation steps
+            (effective batch = batch_size x grad_accum).
         learning_rate: Peak learning rate.
         warmup_steps: Linear warmup steps.
         max_seq_len: Maximum sequence length.
@@ -146,7 +176,7 @@ def get_training_config(
         remove_unused_columns=False,
         dataset_kwargs={"skip_prepare_dataset": True},
         label_names=["labels"],
-        max_seq_length=max_seq_len,
+        max_length=max_seq_len,
     )
 
 
@@ -155,21 +185,23 @@ def train(
     output_dir: str,
     model_id: str = "mistralai/Ministral-3-8B-Instruct-2512",
     num_epochs: int = 1,
-    batch_size: int = 2,
-    grad_accum: int = 4,
+    batch_size: int = 1,
+    grad_accum: int = 8,
     learning_rate: float = 2e-4,
     lora_r: int = 64,
     lora_alpha: int = 128,
-    use_4bit: bool = True,
-    max_seq_len: int = 2048,
+    max_seq_len: int = 4096,
     val_ratio: float = 0.15,
     seed: int = 42,
 ) -> None:
     """Run the full training pipeline.
 
-    Loads data, splits into train/val, loads the quantized model,
-    attaches LoRA adapters, trains with SFTTrainer, and saves
-    the adapter weights.
+    1. Load dataset and split into train/val by example
+    2. Flatten records into individual question-answer pairs
+    3. Load model with FP8 (auto-dequantizes on older GPUs)
+    4. Attach LoRA adapters to language + vision layers
+    5. Train with SFTTrainer
+    6. Save adapter weights and processor
 
     Args:
         dataset_path: Path to dataset.jsonl.
@@ -181,30 +213,24 @@ def train(
         learning_rate: Peak learning rate.
         lora_r: LoRA rank.
         lora_alpha: LoRA alpha.
-        use_4bit: Whether to use 4-bit quantization.
         max_seq_len: Maximum sequence length.
         val_ratio: Validation split ratio.
         seed: Random seed.
     """
-    
     dataset_dir = os.path.dirname(dataset_path)
     records = load_records(dataset_path)
     train_records, val_records = train_val_split(records, val_ratio, seed)
 
-    
     train_examples = flatten(train_records, dataset_dir)
     val_examples = flatten(val_records, dataset_dir)
     print(f"Train: {len(train_records)} records -> {len(train_examples)} examples")
     print(f"Val:   {len(val_records)} records -> {len(val_examples)} examples")
 
-    
     train_dataset = ComplianceDataset(train_examples)
     val_dataset = ComplianceDataset(val_examples)
 
-    
-    model, processor = load_model_and_processor(model_id, use_4bit)
+    model, processor = load_model_and_processor(model_id)
 
-    
     lora_config = get_lora_config(r=lora_r, alpha=lora_alpha)
     training_config = get_training_config(
         output_dir=output_dir,
@@ -215,10 +241,8 @@ def train(
         max_seq_len=max_seq_len,
     )
 
-    
     collate_fn = make_collate_fn(processor, max_seq_len)
 
-    
     trainer = SFTTrainer(
         model=model,
         args=training_config,
@@ -229,11 +253,66 @@ def train(
         data_collator=collate_fn,
     )
 
-    
     print("\nStarting training...")
     trainer.train()
 
-    
     trainer.save_model(output_dir)
     processor.save_pretrained(output_dir)
     print(f"\nAdapter saved to {output_dir}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Fine-tune Ministral 3 8B for compliance checking"
+    )
+    parser.add_argument(
+        "--dataset",
+        default="../data/train/dataset.jsonl",
+        help="Path to training dataset.jsonl",
+    )
+    parser.add_argument(
+        "--output",
+        default="../results/finetuned/ministral-8b-lora",
+        help="Output directory for adapter weights",
+    )
+    parser.add_argument(
+        "--model",
+        default="mistralai/Ministral-3-8B-Instruct-2512",
+        help="Base model HuggingFace ID",
+    )
+    parser.add_argument(
+        "--epochs", type=int, default=1, help="Number of training epochs"
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=1, help="Per-device batch size"
+    )
+    parser.add_argument(
+        "--grad-accum", type=int, default=8, help="Gradient accumulation steps"
+    )
+    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
+    parser.add_argument("--lora-r", type=int, default=64, help="LoRA rank")
+    parser.add_argument("--lora-alpha", type=int, default=128, help="LoRA alpha")
+    parser.add_argument(
+        "--max-seq-len", type=int, default=4096, help="Maximum sequence length"
+    )
+    parser.add_argument(
+        "--val-ratio", type=float, default=0.15, help="Validation split ratio"
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+
+    args = parser.parse_args()
+
+    train(
+        dataset_path=args.dataset,
+        output_dir=args.output,
+        model_id=args.model,
+        num_epochs=args.epochs,
+        batch_size=args.batch_size,
+        grad_accum=args.grad_accum,
+        learning_rate=args.lr,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        max_seq_len=args.max_seq_len,
+        val_ratio=args.val_ratio,
+        seed=args.seed,
+    )
