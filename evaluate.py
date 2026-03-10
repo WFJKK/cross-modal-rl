@@ -27,8 +27,10 @@ import time
 from typing import Any
 import random
 
-
 import requests
+import torch
+from PIL import Image
+from transformers import AutoModelForImageTextToText
 
 
 # ============================================================
@@ -302,20 +304,113 @@ def call_api(image_path: str, prompt: str, model: str, provider: str = "mistral"
     raise RuntimeError("Rate limited after 3 retries")
 
 
-def call_local(image_path: str, prompt: str, model: str) -> str:
-    """Run inference on a local model (e.g. finetuned LoRA adapter).
+# ============================================================
+# Local model cache (loaded once, reused across questions)
+# ============================================================
 
-    Not yet implemented — will be added after finetuning.
+_local_model: Any = None
+_local_processor: Any = None
+
+
+def _load_local_model(adapter_path: str) -> None:
+    """Load base model with LoRA adapter. Called once, result cached.
+
+    Reads the adapter config to find the base model ID, loads it with
+    FineGrainedFP8Config (auto-dequantizes to bf16 on older GPUs),
+    then attaches the LoRA adapter on top.
+
+    Args:
+        adapter_path: Path to the LoRA adapter directory.
+    """
+    global _local_model, _local_processor
+
+    if _local_model is not None:
+        return
+
+    from transformers import AutoProcessor, FineGrainedFP8Config
+    from peft import PeftModel
+
+    adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
+    with open(adapter_config_path) as f:
+        adapter_config = json.load(f)
+    base_model_id = adapter_config["base_model_name_or_path"]
+
+    print(f"Loading base model: {base_model_id}")
+    base_model = AutoModelForImageTextToText.from_pretrained(
+        base_model_id,
+        device_map="auto",
+        attn_implementation="eager",
+        quantization_config=FineGrainedFP8Config(),
+    )
+
+    print(f"Loading LoRA adapter: {adapter_path}")
+    _local_model = PeftModel.from_pretrained(base_model, adapter_path)
+    _local_model.eval()
+
+    _local_processor = AutoProcessor.from_pretrained(adapter_path)
+    if _local_processor.tokenizer.pad_token is None:
+        _local_processor.tokenizer.add_special_tokens(
+            {"pad_token": _local_processor.tokenizer.eos_token}
+        )
+
+    print("Model ready for inference")
+
+
+def call_local(image_path: str, prompt: str, model: str) -> str:
+    """Run inference with a local finetuned model.
+
+    Loads the base model + LoRA adapter on first call (cached for
+    subsequent calls). Processes the image and prompt, generates a
+    response using greedy decoding.
 
     Args:
         image_path: Path to the PNG image file.
         prompt: The formatted prompt from prompt_builder.
-        model: Path to the local model or adapter weights.
+        model: Path to the LoRA adapter directory.
 
-    Raises:
-        NotImplementedError: Always, until finetuning is complete.
+    Returns:
+        The model's text response.
     """
-    raise NotImplementedError("TODO: add after finetuning")
+    _load_local_model(model)
+
+    image = Image.open(image_path).convert("RGB")
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": prompt},
+            ],
+        },
+    ]
+
+    text = _local_processor.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=False,
+    )
+
+    inputs = _local_processor(
+        text=text,
+        images=[image],
+        return_tensors="pt",
+    ).to(_local_model.device)
+
+    with torch.no_grad():
+        output_ids = _local_model.generate(
+            **inputs,
+            max_new_tokens=512,
+            do_sample=False,
+        )
+
+    new_tokens = output_ids[0, inputs["input_ids"].shape[1]:]
+    response = _local_processor.tokenizer.decode(
+        new_tokens, skip_special_tokens=True
+    )
+
+    return response
 
 
 def call_model(
