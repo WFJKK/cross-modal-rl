@@ -41,6 +41,7 @@ from data_loader import (
     flatten,
     load_records,
     make_collate_fn,
+    oversample_no,
     train_val_split,
 )
 
@@ -192,16 +193,18 @@ def train(
     lora_alpha: int = 128,
     max_seq_len: int = 4096,
     val_ratio: float = 0.15,
+    oversample_ratio: float = 0.0,
     seed: int = 42,
 ) -> None:
     """Run the full training pipeline.
 
     1. Load dataset and split into train/val by example
     2. Flatten records into individual question-answer pairs
-    3. Load model with FP8 (auto-dequantizes on older GPUs)
-    4. Attach LoRA adapters to language + vision layers
-    5. Train with SFTTrainer
-    6. Save adapter weights and processor
+    3. Optionally oversample 'No' compliance examples
+    4. Load model with FP8 (auto-dequantizes on older GPUs)
+    5. Attach LoRA adapters to language + vision layers
+    6. Train with SFTTrainer
+    7. Save adapter weights and processor
 
     Args:
         dataset_path: Path to dataset.jsonl.
@@ -215,6 +218,8 @@ def train(
         lora_alpha: LoRA alpha.
         max_seq_len: Maximum sequence length.
         val_ratio: Validation split ratio.
+        oversample_ratio: Target fraction of No among compliance
+            examples. 0.0 means no oversampling.
         seed: Random seed.
     """
     dataset_dir = os.path.dirname(dataset_path)
@@ -225,6 +230,10 @@ def train(
     val_examples = flatten(val_records, dataset_dir)
     print(f"Train: {len(train_records)} records -> {len(train_examples)} examples")
     print(f"Val:   {len(val_records)} records -> {len(val_examples)} examples")
+
+    if oversample_ratio > 0:
+        train_examples = oversample_no(train_examples, oversample_ratio)
+        print(f"Train after oversampling: {len(train_examples)} examples")
 
     train_dataset = ComplianceDataset(train_examples)
     val_dataset = ComplianceDataset(val_examples)
@@ -299,6 +308,12 @@ if __name__ == "__main__":
         "--val-ratio", type=float, default=0.15, help="Validation split ratio"
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--oversample",
+        type=float,
+        default=0.0,
+        help="Target No ratio for oversampling (0.0 = off, 0.3 = 30%% No)",
+    )
 
     args = parser.parse_args()
 
@@ -314,5 +329,6 @@ if __name__ == "__main__":
         lora_alpha=args.lora_alpha,
         max_seq_len=args.max_seq_len,
         val_ratio=args.val_ratio,
+        oversample_ratio=args.oversample,
         seed=args.seed,
     )

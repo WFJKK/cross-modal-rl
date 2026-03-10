@@ -114,6 +114,64 @@ def flatten(
     return examples
 
 
+def oversample_no(
+    examples: list[dict[str, Any]],
+    target_ratio: float = 0.3,
+) -> list[dict[str, Any]]:
+    """Oversample 'No' compliance examples to reduce Yes bias.
+
+    The dataset is ~90% Yes / 10% No for compliance questions.
+    Training on this imbalance teaches the model to always say Yes.
+    This function duplicates No examples until they reach target_ratio
+    of compliance examples. Non-compliance questions (measurements,
+    audit, etc.) are passed through unchanged.
+
+    Args:
+        examples: Flat examples from flatten().
+        target_ratio: Desired fraction of No among compliance
+            examples. 0.3 means 30% No, 70% Yes.
+
+    Returns:
+        New list with oversampled No examples added.
+    """
+    compliance_yes: list[dict[str, Any]] = []
+    compliance_no: list[dict[str, Any]] = []
+    other: list[dict[str, Any]] = []
+
+    for ex in examples:
+        if ex["question_type"] == "per_component_compliance":
+            if ex["answer"] == "No":
+                compliance_no.append(ex)
+            else:
+                compliance_yes.append(ex)
+        else:
+            other.append(ex)
+
+    n_yes = len(compliance_yes)
+    n_no = len(compliance_no)
+    print(
+        f"Before oversampling: {n_yes} Yes, {n_no} No "
+        f"({n_no / (n_yes + n_no):.1%} No)"
+    )
+
+    # n_no_target = target_ratio * n_yes / (1 - target_ratio)
+    n_no_target = int(target_ratio * n_yes / (1 - target_ratio))
+
+    if n_no_target <= n_no:
+        print("Already at or above target ratio, no oversampling needed")
+        return examples
+
+    extra = random.choices(compliance_no, k=n_no_target - n_no)
+
+    n_total_no = n_no + len(extra)
+    print(
+        f"After oversampling: {n_yes} Yes, {n_total_no} No "
+        f"({n_total_no / (n_yes + n_total_no):.1%} No)"
+    )
+
+    return compliance_yes + compliance_no + extra + other
+
+
 def format_chat(example: dict[str, Any]) -> dict[str, Any]:
     """Format a flat example as a multimodal chat conversation.
 
