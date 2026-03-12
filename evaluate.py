@@ -473,6 +473,7 @@ def run_predictions(
     provider: str = "mistral",
     max_examples: int | None = None,
     question_types: list[str] | None = None,
+    ablation: str = "none",
 ) -> None:
     """Run model predictions on the dataset and save to a JSONL file.
 
@@ -480,6 +481,11 @@ def run_predictions(
     and writes predictions with ground truth and metadata. Supports
     resuming from a partial run — skips examples that are already in the
     output file. Shuffles with a fixed seed for reproducibility.
+
+    Ablation modes:
+        none: Normal evaluation with image + spec + question.
+        no-image: Text-only evaluation. Sends a blank white image.
+        no-spec: Image-only evaluation. Replaces spec with placeholder.
 
     Args:
         dataset_path: Path to dataset/dataset.jsonl.
@@ -489,7 +495,11 @@ def run_predictions(
         provider: API provider name (for backend='api').
         max_examples: Maximum number of examples to process (None for all).
         question_types: List of question types to include (None for all).
+        ablation: One of 'none', 'no-image', 'no-spec'.
     """
+    if ablation != "none":
+        print(f"ABLATION MODE: {ablation}")
+
     with open(dataset_path, "r") as f:
         data = [json.loads(line) for line in f]
 
@@ -500,6 +510,14 @@ def run_predictions(
         data = data[:max_examples]
 
     dataset_dir = os.path.dirname(dataset_path)
+
+    # For no-image ablation: create a blank white image
+    blank_image_path = None
+    if ablation == "no-image":
+        blank_image_path = os.path.join(dataset_dir, "_blank.png")
+        if not os.path.exists(blank_image_path):
+            img = Image.new("RGB", (400, 300), "white")
+            img.save(blank_image_path)
 
     # Resume: skip already-completed examples
     completed = load_completed_examples(output_path)
@@ -519,6 +537,12 @@ def run_predictions(
             image_path = os.path.join(dataset_dir, record["image"])
             spec_text = record["spec_text"]
             metadata = record["metadata"]
+
+            # Apply ablation
+            if ablation == "no-image":
+                image_path = blank_image_path
+            if ablation == "no-spec":
+                spec_text = "[Specification removed for ablation study]"
 
             for j, question in enumerate(record["questions"]):
                 if question_types and question["type"] not in question_types:
@@ -1301,6 +1325,9 @@ def main() -> None:
                             help="Max examples to process")
     run_parser.add_argument("--types", nargs="+", default=None,
                             help="Question types to evaluate")
+    run_parser.add_argument("--ablation", default="none",
+                            choices=["none", "no-image", "no-spec"],
+                            help="Ablation mode: none (normal), no-image (text only), no-spec (image only)")
 
     # --- score ---
     score_parser = subparsers.add_parser("score", help="Score existing predictions")
@@ -1329,6 +1356,7 @@ def main() -> None:
             provider=args.provider,
             max_examples=args.max_examples,
             question_types=args.types,
+            ablation=args.ablation,
         )
 
     elif args.command == "score":
