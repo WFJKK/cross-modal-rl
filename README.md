@@ -1,170 +1,297 @@
-# Synthetic Dataset Generation for VLM Engineering Documentation QA
+# Multimodal Reasoning on Synthetic Data
 
 **Author:** Joshua Kames-King
 
-**Built with:** Claude Code (Anthropic) was used extensively as a development tool throughout this project. The dataset is designed for fine-tuning Mistral's vision-language models.
-
 ---
 
-A synthetic data generation pipeline that produces multimodal training data for vision-language models on engineering design compliance checking. The pipeline generates technical drawings of mechanical plates with holes, paired with specification documents and exhaustive question-answer sets with step-by-step reasoning chains.
+A synthetic data generation and finetuning pipeline for improving vision-language model performance on engineering design compliance checking. The project demonstrates that SFT on targeted synthetic data produces genuine but shallow cross-modal reasoning: Ministral 3 8B goes from 51.8% to 87.5% balanced accuracy on compliance checking, with measurement extraction error dropping from 8.14mm to 2.84mm. Ablation studies confirm the model uses both image and specification inputs, but reveal that its visual reasoning is limited to label reading and coarse spatial estimation.
 
-This dataset aims to specifically train VLMs to 1) strengthen quantitative visual "understanding" and 2) perform multi-modal multi-hop reasoning as described in more detail in the next subsection.
+The pipeline generates technical drawings of mechanical plates with holes, paired with specification documents and exhaustive question-answer sets with step-by-step reasoning chains. Two controllable difficulty axes (annotation density and rule complexity) enable both curriculum training and diagnostic evaluation.
 
-## Motivation and General Idea
+## Motivation
 
-Current VLMs struggle with cross-modal reasoning on engineering documents — extracting rules from text specifications and applying them to visual diagrams. DesignQA showed that even GPT-4o and LLaVA perform poorly on compliance checking tasks.
+Current VLMs struggle with cross-modal reasoning on engineering documents, requiring models to extract rules from text specifications and apply them to visual diagrams. DesignQA showed that even GPT-4o and LLaVA perform poorly on compliance checking tasks.
 
 It is a priori not obvious what the exact failure mode is: a lack of ability of VLMs to infer quantitative data from the images, or multi-modal reasoning itself, or even a combination of both. There are hints in the literature that VLMs struggle significantly with quantitative visual questions ("how far apart are these objects?"), see for example Liao et al. (Q-Spatial, arXiv:2409.09788). Hence, we consider a self-created synthetic dataset that targets both failure modes through two controllable meta-parameters:
 
-1. **Annotation density**: Each drawing is generated at three levels: fully annotated (all dimensions labeled), partially annotated (some dimensions removed), and unannotated (no dimension labels). At full annotation the task reduces to OCR + logic, isolating the reasoning component. At no annotation the model must infer measurements from visual proportions alone, directly training the quantitative spatial skill that the literature identifies as deficient. SpatialVLM (Chen et al., CVPR 2024) showed that this gap is data-driven rather than architectural — training on synthetic spatial data significantly improved quantitative estimation. Hence we are hopeful that synthetic data will help here too.
+1. **Annotation density**: Each drawing is generated at three levels: fully annotated (all dimensions labeled), partially annotated (some dimensions removed), and unannotated (no dimension labels). At full annotation the task reduces to OCR + logic, isolating the reasoning component. At no annotation the model must infer measurements from visual proportions alone, directly training the quantitative spatial skill that the literature identifies as deficient. SpatialVLM (Chen et al., CVPR 2024) showed that this gap is data-driven rather than architectural, so we are hopeful that synthetic data will help here too.
 
-2. **Rule complexity**: Specification documents range from simple single-threshold rules ("all holes shall have diameter 8.0 ± 0.3mm") to conditional rules that require multi-hop cross-modal reasoning ("for Class A joints where hole spacing < 20mm, minimum edge distance shall be ≥ 2.0× hole diameter"). This forces the model to perform image → text → image → compute chains of increasing depth, targeting the cross-modal reasoning gap identified by DesignQA.
+2. **Rule complexity**: Specification documents range from simple single-threshold rules ("all holes shall have diameter 8.0 +/- 0.3mm") to conditional rules that require multi-hop cross-modal reasoning ("for Class A joints where hole spacing < 20mm, minimum edge distance shall be >= 2.0x hole diameter"). This forces the model to perform image -> text -> image -> compute chains of increasing depth, targeting the cross-modal reasoning gap identified by DesignQA.
 
-By varying these two axes independently, the dataset serves both as training data (graduated difficulty acts as a curriculum) and as a diagnostic tool (performance across the grid reveals whether failures stem from spatial inference, reasoning, or their combination).
-
-In addition, we include step-by-step reasoning chains as worked examples in the training data (but not as part of the evaluation).
+By varying these two axes independently, the dataset serves both as training data (graduated difficulty acts as a curriculum) and as a diagnostic tool (performance across the 3x3 grid reveals whether failures stem from spatial inference, reasoning, or their combination).
 
 Each example requires the model to:
 1. **Parse rules** from a specification document (text)
 2. **Extract measurements** from a technical drawing (image)
 3. **Apply rules to measurements** and determine compliance (reasoning)
 
-## Architecture
+## Results
+
+### Summary
+
+| Metric | Baseline (197 ex.) | Unbalanced SFT (30 ex.) | Balanced SFT (50 ex.) |
+|--------|----------|----------------|--------------|
+| Overall accuracy | 13.5% | 93.3% | 91.1% |
+| Yes accuracy | 5.3% | 98.7% | 92.1% |
+| No accuracy | 98.3% | 47.2% | 82.8% |
+| **Balanced accuracy** | **51.8%** | **73.0%** | **87.5%** |
+| Measurement MAE | 8.14mm | 3.25mm | 2.84mm |
+| Counterfactual MAE | 4.85mm | 0.17mm | 0.07mm |
+| Rule selection | 0% | 100% | 100% |
+| Audit F1 | 0.228 | 0.467 | 0.501 |
+
+Balanced accuracy (average of Yes and No accuracy) is the primary metric because the test set is ~90% Yes. A model that always says "Yes" achieves 90% raw accuracy but only 50% balanced accuracy. No accuracy (violation detection) is the most operationally important metric: in a compliance checking system, the entire value is in catching violations.
+
+### Baseline: Ministral 8B (197 test examples, 3,418 compliance questions)
+
+The base model exhibits extreme "No" bias, predicting non-compliance for virtually everything (98.3% No accuracy, 5.3% Yes accuracy). Despite this, it extracts measurements reasonably well (diameter MAE 0.42mm), suggesting the bottleneck is reasoning, not vision.
+
+**3x3 Grid (annotation x complexity):**
+
+|           | Simple | Multi-rule | Conditional |
+|-----------|--------|------------|-------------|
+| Full      | 19.7%  | 14.2%      | 12.0%       |
+| Partial   | 20.8%  | 13.5%      | 11.8%       |
+| Minimal   | 16.7%  | 9.8%       | 8.9%        |
+
+Both difficulty gradients are visible: simple -> conditional (18.8% -> 11.1%) and full -> minimal (14.7% -> 11.6%).
+
+### Finetuned: Balanced SFT (50 test examples, 857 compliance questions)
+
+Trained on 250 examples with 30% No oversampling using LoRA (rank 64, alpha 128) on Ministral 3 8B-Instruct with FP8 weights. LoRA targets both language model and vision encoder layers (they share the same projection names). Training: 1 epoch, ~4 hours on A100 80GB.
+
+**3x3 Grid (annotation x complexity):**
+
+|           | Simple | Multi-rule | Conditional |
+|-----------|--------|------------|-------------|
+| Full      | 92.0% (n=75)  | 93.2% (n=88)  | 94.1% (n=220) |
+| Partial   | 77.8% (n=45)  | 88.3% (n=60)  | 91.0% (n=188) |
+| Minimal   | 90.6% (n=117) | 75.0% (n=16)  | 95.8% (n=48)  |
+
+The annotation gradient partially holds (full > partial consistently), but the complexity gradient is inverted (conditional scores highest). See the Analysis section for an explanation.
+
+### Measurement Improvement
+
+| Type | Baseline | Finetuned | Improvement |
+|------|----------|-----------|-------------|
+| Diameter | 0.42mm | 0.13mm | 3x better |
+| Edge distance | 11.99mm | 1.91mm | 6x better |
+| Hole-to-hole | 20.10mm | 9.33mm | 2x better |
+| Plate dimensions | 0.0mm | 0.0mm | (perfect) |
+
+Spatial measurements (edge distance, hole-to-hole) improved substantially but hole-to-hole remains the hardest at 9.33mm MAE. The measurement faithfulness analysis below explains why.
+
+### Measurement MAE by Annotation Level
+
+|           | Full  | Partial | Minimal |
+|-----------|-------|---------|---------|
+| Overall   | 1.69mm | 3.84mm | 3.81mm |
+
+The annotation gradient is clearly visible in measurements: the model is measurably worse at extracting numbers when labels are absent. This gradient is hidden in the compliance metric because the binary Yes/No decision is tolerant of measurement error -- you can get the measurement somewhat wrong and still get the compliance answer right, especially when 90% of answers are Yes.
+
+## Ablation Studies
+
+We ran two ablation experiments on 30 test examples each, using the same random seed as the main evaluation for comparability.
+
+### Setup
+
+**No-image ablation:** Replace the technical drawing with a blank white image. If compliance accuracy remains high, the model is using a text-only shortcut.
+
+**No-spec ablation:** Replace the specification document with a placeholder string. If accuracy remains high, the model extracts everything from the image alone.
+
+### Results: Both Modalities Required
+
+|                     | Full model | No image | No spec |
+|---------------------|------------|----------|---------|
+| Overall accuracy    | 91.1%      | 77.1%    | 88.2%   |
+| Yes accuracy        | 92.1%      | 81.6%    | 93.7%   |
+| No accuracy         | 82.8%      | 37.7%    | 41.5%   |
+| **Balanced accuracy** | **87.5%** | **59.7%** | **67.6%** |
+
+The model requires both modalities for violation detection. No accuracy collapses from 82.8% to 37.7% without images and to 41.5% without the specification. This rules out H2 (text-only shortcut) and confirms genuine cross-modal reasoning.
+
+### Violation Detection by Annotation Level
+
+Breaking down No accuracy by annotation level reveals which images the model depends on:
+
+|           | Full model | No image | Drop |
+|-----------|------------|----------|------|
+| Full      | 84.2% (n=38) | 15.8% (n=19) | -68.4 |
+| Partial   | 84.6% (n=26) | 36.8% (n=19) | -47.8 |
+| Minimal   | 78.3% (n=23) | 66.7% (n=15) | -11.6 |
+
+The pattern is the opposite of what spatial reasoning would predict. At full annotation, the model is completely dependent on the image for violation detection (68 point drop when removed), because it reads dimension labels. At minimal annotation, removing the image barely matters (11.6 point drop), because the model is largely solving these from text patterns in the spec and question. The model has learned to read labels, not to reason spatially.
+
+Note: sample sizes are small (15-38 per cell). The direction of the gradient across all three levels (68 > 48 > 12) is consistent.
+
+## Analysis: What Did the Model Learn?
+
+### Measurement Faithfulness
+
+The model claims "Using the scale bar" in its reasoning chains for minimal annotation examples. To test whether this is genuine, we compared measurements with and without the image at minimal annotation:
+
+| Type | MAE with image | MAE no image | MAE no spec | Interpretation |
+|------|----------------|--------------|-------------|----------------|
+| Plate dims | 0.0mm | 25.3mm | 0.0mm | **Genuine visual reasoning** from image only |
+| Hole-to-hole | 8.5mm | 40.9mm | 8.1mm | **Partial visual reasoning**, imprecise |
+| Diameter | 0.4mm | 0.9mm | 1.7mm | **Mostly spec priors** (nominal values in rules) |
+| Edge distance | 6.5mm | 5.1mm | 8.0mm | **No reliable strategy** |
+
+The image is essential for large-scale features (plate outline, relative hole positions) but not for small-scale measurements (diameter, edge distance). The model says "Using the scale bar" even when looking at a blank white image, confirming the chain-of-thought text is a learned template, not faithful reasoning.
+
+Critically, even though the reasoning text is unfaithful, the actual numerical outputs change with the image for plate dims and hole-to-hole, confirming that genuine visual processing occurs at the representation level. The faithfulness gap is in the verbalized reasoning, not the underlying computation.
+
+### Adaptive Strategy by Annotation Level
+
+At full annotation, the model reads labels directly:
+
+> "The annotation on H1 reads diameter 6.2mm."
+
+> "H3 is at (102.1, 67.4) on a 149.0x92.0mm plate. Distances to edges: left=102.1mm, right=46.9mm, bottom=67.4mm, top=24.6mm."
+
+At minimal annotation, the model switches to estimation:
+
+> "Using the scale bar, H6 appears approximately 10mm in diameter."
+
+> "Using the scale bar, the plate appears approximately 131x87mm."
+
+The model adapts its strategy to the annotation level. At full it reads labels; at minimal it estimates. But the quality of the estimation varies drastically by measurement type: perfect for plate dimensions, poor for spatial relationships between components.
+
+### Training Data Drives the Strategy
+
+At full annotation, the training data provides reasoning chains with exact ground truth coordinates:
+
+> "H4 is at (43.2, 18.7) on a 90.0x75.0mm plate. Distances to edges: left=43.2mm, right=46.8mm, bottom=18.7mm, top=56.3mm."
+
+At minimal annotation, training chains use vague estimation:
+
+> "Using the scale bar, H4 appears approximately 22mm from the bottom edge."
+
+These coordinates are not visible in the images. They come from the data generation pipeline. At inference, the model hallucinates coordinates in the learned format and does arithmetic on them. Sometimes this is accurate (when the model can roughly perceive positions), sometimes it is not.
+
+This reveals a fundamental property of SFT: the model learns to use the easiest information pathway available in the training data. For fully annotated images, that pathway is label reading (OCR + arithmetic). The model never needed to develop precise visual measurement because the labels provided exact values. Visual reasoning only emerges as a fallback for features where no textual shortcut exists.
+
+### Text Priors Enable Shortcut at Minimal Annotation
+
+The specification text provides strong priors that reduce the need for visual measurement:
+
+- **Nominal values**: "Nominal diameter for Zone A holes: 8.0 mm" lets the model guess diameters without measuring
+- **Threshold values**: "Minimum hole-to-hole spacing shall be 35.0 mm" gives the decision boundary
+- **Training distribution**: ~90% of holes comply, so guessing "Yes" without measuring is statistically reliable
+
+At minimal annotation, the model's effective strategy is: "I know the threshold from the spec, I know most holes comply from training, I'll say Yes unless something in the image is obviously wrong." This achieves ~91% compliance accuracy without precise spatial measurement.
+
+### Why the Difficulty Gradient Disappears
+
+The baseline shows both gradients (annotation: full 14.7% -> minimal 11.6%; complexity: simple 18.8% -> conditional 11.1%). After finetuning, these collapse in the compliance metric.
+
+**Complexity gradient (inverted):** The training data explicitly teaches the multi-hop lookup chain for conditional rules. Once the model learns the template ("read spec -> find threshold -> read value -> compare"), conditional rules are not harder than simple ones. The training data eliminates the reasoning difficulty by demonstration. This supports H1 (template matching).
+
+**Annotation gradient (hidden):** The gradient IS present in measurement MAE (full 1.69mm vs minimal 3.81mm), proving the model is worse at extracting numbers without labels. But the compliance metric hides this because the binary Yes/No threshold is forgiving: you can be off by several mm and still get the compliance decision right, especially when 90% of answers are Yes.
+
+### Hypotheses Resolved
+
+The original hypotheses for the missing gradient:
+
+- **H1 (Template matching): Confirmed.** The model learned a single reasoning template that handles all complexity levels. The training data teaches the lookup chain explicitly.
+- **H2 (Text-only shortcut): Rejected.** The ablation shows removing images drops balanced accuracy by 27.8 points. The model genuinely uses images.
+- **H3 (Saturated difficulty): Partially confirmed.** The clean matplotlib drawings are easy enough that the model can read labels with high accuracy regardless of annotation level. The model's visual reasoning is real but limited to coarse spatial features.
+
+The full picture is a combination: the model uses genuine cross-modal reasoning (rejecting H2), but the reasoning is shallow -- it consists of label reading at full annotation and coarse spatial estimation at minimal, rather than precise spatial measurement. SFT teaches the easiest pathway present in the training data.
+
+## Known Limitations and Next Steps
+
+### Current Limitations
+
+- **Yes/No imbalance**: Test set is ~90% Yes. Per-cell No counts are too small (0-38) for reliable grid analysis of violation detection.
+- **50-example evaluation**: Balanced SFT evaluated on 50 of 197 test examples. Extending to 197 would tighten grid statistics.
+- **Unfaithful chain-of-thought**: The model verbalizes "Using the scale bar" even without an image. The reasoning text is a learned template, not an accurate description of the model's process.
+- **Training data leaks coordinates**: Full annotation reasoning chains contain ground truth coordinates from the data pipeline, teaching coordinate hallucination rather than visual extraction.
+- **Synthetic-to-real gap**: Matplotlib drawings with clean geometry are far simpler than real CAD output. Transfer to real engineering documents (DesignQA) is untested.
+
+### Next Experiments
+
+- **DesignQA transfer**: Evaluate on real CAD drawings to test whether the learned reasoning transfers beyond synthetic data. If it fails, this confirms that the model's visual skills are specific to clean synthetic images.
+- **Vision degradation check**: Run ChartQA/DocVQA before and after finetuning to verify that domain-specific training did not degrade general vision capabilities.
+- **Hard-mode synthetic data**: Generate training images with labels stripped even at "full" annotation, forcing the model to develop genuine visual measurement strategies rather than label reading.
+- **Explicit spatial reasoning chains**: Replace coordinate-based chains with scale bar reasoning ("the scale bar shows 20mm spans approximately 150 pixels; the hole diameter spans 47 pixels; therefore diameter ~ 6.3mm"). This would teach a transferable visual measurement strategy.
+- **RL with GRPO**: Use compliance accuracy as reward to let the model discover its own visual reasoning strategies. SFT is limited to imitating demonstrated reasoning, but RL can optimize for correct answers regardless of the reasoning path. This is most promising for spatial measurement where the correct reasoning approach is not obvious.
+- **Curriculum on annotation stripping**: Start training with fully labeled images (teaching the reasoning template), then progressively remove labels (forcing visual strategies). The model builds on the template while developing visual measurement skills.
+- **Per-cell oversampling**: Balance training data within each grid cell independently, particularly increasing No examples to improve violation detection.
+
+## Dataset Architecture
 
 The pipeline has five stages:
 
 ```
-sampler.py → spec_generator.py → question_generator.py → renderer.py → orchestrator.py
+sampler.py -> spec_generator.py -> question_generator.py -> renderer.py -> orchestrator.py
 ```
 
 ### 1. Parameter Sampler (`sampler.py`)
 
-Generates plate configurations with controlled compliance states using **constructive sampling**:
-- Decides the desired outcome first (which rules should be violated, by which holes)
-- Places holes to achieve that exact compliance state
-- Verifies geometric validity and single-rule violations
-
-This avoids the reject-and-retry problem of random generation. Each violating hole fails exactly one intended rule, giving clean ground truth.
-
-**Parameters:**
-- Plate dimensions: 80–160mm × 50–100mm
-- Holes: 3–8 per plate, diameters 6–16mm
-- Four rule types: tolerance, edge distance, spacing, bolt population
+Generates plate configurations with controlled compliance states using **constructive sampling**: decides the desired outcome first (which rules should be violated, by which holes), places holes to achieve that exact compliance state, and verifies geometric validity and single-rule violations. This avoids the reject-and-retry problem of random generation.
 
 ### 2. Specification Generator (`spec_generator.py`)
 
-Converts plate configurations into readable specification documents. The same underlying rules are presented with varying complexity:
-
-- **Simple**: 2–3 rules, direct statements ("All holes shall have diameter 10.0 ± 0.5mm")
-- **Multi-rule**: 4 rules including bolt population, single zone
-- **Conditional**: 4 rules, two zones, table lookups, material-class mapping requiring multi-hop reasoning
-
-Rule order is shuffled in the document while preserving IDs, forcing models to locate rules by ID rather than position.
-
-For conditional complexity, the model must chain multiple lookups:
-1. Read material from header → "Aluminum 6061-T6"
-2. Look up material-to-class mapping → Class II
-3. Find tolerance table, Class II row
-4. Determine hole size category (small/large)
-5. Extract tolerance and compute acceptable range
+Converts plate configurations into readable specification documents with varying complexity: simple (2-3 rules, direct statements), multi-rule (4 rules including bolt population), and conditional (4 rules, two zones, table lookups, material-class mapping requiring multi-hop reasoning).
 
 ### 3. Question Generator (`question_generator.py`)
 
-Produces exhaustive question-answer pairs with **annotation-aware reasoning chains**:
-
-- **Per-component compliance**: Every hole × every rule checked individually
-- **Full audit**: "List all violations" — tests systematic completeness
-- **Measurement extraction**: Distance between holes or edge distances
-- **Rule selection** (conditional only): Tests spec parsing ("What tolerance applies to Zone B?")
-- **Counterfactual**: "What minimum edge distance would H3 need to comply?" — tests backward reasoning
-
-The reasoning chains adapt to the annotation level:
-- **Full**: Exact values from labels — "H1 diameter is 7.9mm."
-- **Partial**: Mix of exact (for visible labels) and approximate — "From the scale bar, H2 diameter appears approximately 8mm."
-- **Minimal**: All approximate — "From the scale bar, H3 appears approximately 10mm from the top edge."
-
-This ensures the training data teaches reasoning that matches what the model can actually see in each image. The annotation visibility decisions are shared between the renderer and question generator so they always agree on what's shown.
+Produces exhaustive question-answer pairs with annotation-aware reasoning chains: per-component compliance (every hole x every rule), full audit, measurement extraction, rule selection (conditional only), and counterfactual reasoning.
 
 ### 4. Image Renderer (`renderer.py`)
 
-Generates technical drawings with three annotation levels:
-
-- **Full**: All diameters labeled, edge distances shown, spacing annotations
-- **Partial**: Some annotations randomly hidden (ensuring hidden ones are relevant to violations)
-- **Minimal**: Hole IDs only, scale bar, no dimension labels
-
-The annotation level controls how hard it is to extract measurements from the image. The same questions apply regardless of annotation level — only the visual information changes.
+Generates technical drawings at three annotation levels: full (all dimensions labeled), partial (some annotations hidden), and minimal (hole IDs and scale bar only).
 
 ### 5. Pipeline Orchestrator (`orchestrator.py`)
 
-Generates balanced datasets with even distribution across:
-- 3 rule complexities × 3 annotation levels × 4 violation counts = 36 combinations
+Generates balanced datasets with even distribution across 3 rule complexities x 3 annotation levels x 4 violation counts = 36 combinations.
 
-Outputs:
-- `dataset.jsonl` — one record per example with image path, spec text, all QA pairs, and full metadata
-- `images/` — PNG technical drawings
-- `stats.json` — dataset statistics
+## Training Pipeline
 
-## Design Decisions
+### Data Loader (`training/data_loader.py`)
 
-### Why constructive sampling?
+Loads dataset JSONL, splits train/val by example (not by question, to prevent image leakage), flattens records into individual question-answer pairs, formats as Mistral multimodal chat conversations, and provides a custom collator for batching images and text with proper label masking.
 
-Random hole placement with post-hoc compliance checking leads to either: (a) most examples being fully compliant (which is not useful), or (b) messy multi-rule violations that make ground truth ambiguous. Constructive sampling guarantees exact control over the compliance state.
+### Training Script (`training/train_ministral8b.py`)
 
-### Why three annotation levels?
+Fine-tunes Ministral 3 8B with LoRA adapters using HuggingFace TRL. The model loads with FP8 weights (auto-dequantizes to bf16 on A100 GPUs). Key configuration: LoRA rank 64 targeting all attention and MLP layers in both language model and vision encoder, 8-bit AdamW optimizer, cosine learning rate schedule with warmup, gradient checkpointing.
 
-This creates a natural curriculum:
-- **Full annotation** teaches the reasoning pattern: parse rule → extract value → compute → conclude
-- **Minimal annotation** forces visual inference: the model already knows the reasoning, but must get numbers from geometry instead of labels, which might be one of the failure modes as described in the motivation section
-- The same questions and answers apply regardless — only the information source changes
+```bash
+# Training
+cd training
+python train_ministral8b.py \
+    --dataset ../data/train/dataset.jsonl \
+    --output ../results/finetuned/ministral-8b-lora-balanced \
+    --oversample 0.3
 
-### Why exhaustive hole × rule questions?
+# Evaluation (requires GPU for local inference)
+python evaluate.py run \
+    --model results/finetuned/ministral-8b-lora-balanced \
+    --backend local \
+    --dataset data/test/dataset.jsonl \
+    --output results/finetuned/ministral-8b-lora-balanced/predictions.jsonl
 
-Each example checks every hole against every rule. This teaches systematic compliance checking rather than cherry-picking. A model trained on incomplete checks would learn to be incomplete.
-
-### Avoiding data contamination
-
-The data teaches reasoning skills, not memorizable facts, by construction:
-- Every example has unique plate dimensions, hole positions, and rule parameters
-- Rule order is shuffled in specs
-- Material-class mapping is consistent but tolerance values vary per example
-- The model cannot memorize "Aluminum = ±0.5mm" because the tolerance for each class changes between examples
+# Score and compare
+python evaluate.py score --predictions results/finetuned/ministral-8b-lora-balanced/predictions.jsonl \
+    --results results/finetuned/ministral-8b-lora-balanced/results.json
+python evaluate.py compare \
+    --a results/baseline/ministral-8b/results.json \
+    --b results/finetuned/ministral-8b-lora-balanced/results.json \
+    --label-a Baseline --label-b "Balanced SFT"
+```
 
 ## Evaluation
 
-The evaluation script (`evaluate.py`) scores model predictions against ground truth on five metrics. There are two directions of failure: reasoning and quantitative spatial inference ability, and models may have different behaviours with regard to these two dimensions.
+The evaluation script (`evaluate.py`) scores model predictions on five metrics:
 
-### 1. Compliance Classification Accuracy
-Binary Yes/No for each hole × rule pair. Broken down by:
-- **Annotation level**: Does accuracy drop from full → partial → minimal? This gap measures quantitative spatial inference ability.
-- **Rule complexity**: simple → multi_rule → conditional. Here we are probing multi-modal reasoning.
-- **Rule type**: tolerance vs edge distance vs spacing vs bolt
-- **Answer balance**: accuracy on Yes vs No answers (detects bias)
+1. **Compliance accuracy** (overall + 3x3 annotation x complexity grid + balanced accuracy)
+2. **Measurement MAE** in mm (overall + by annotation level + by measurement type)
+3. **Audit F1** (precision, recall, F1 for violation detection)
+4. **Counterfactual MAE** (backward reasoning: "what value would make this comply?")
+5. **Rule selection accuracy** (spec parsing for conditional complexity)
 
-### 2. Full Audit F1
-The model produces a violation list, ground truth is a list. Precision catches hallucinated violations, recall catches missed ones. F1 combines both.
-
-### 3. Measurement Extraction Error
-Absolute error in mm between predicted and true distances. Directly measures spatial information extraction from images.
-
-### 4. Rule Understanding Accuracy
-For rule_selection questions — can the model correctly parse the spec to find applicable parameters?
-
-### 5. Counterfactual Accuracy
-Can the model compute correct thresholds for compliance? Tests backward reasoning.
-
-### Running Evaluation
-
-```bash
-# Generate predictions (one JSONL line per question)
-# Format: {"example_id": "EX-0000", "question_index": 0, "prediction": "Yes"}
-
-# Score predictions
-python evaluate.py --predictions predictions.jsonl --ground_truth dataset/dataset.jsonl
-
-# Test with mock models
-python test_evaluate.py
-```
+Supports both API-based evaluation (Mistral, OpenAI, Anthropic) and local inference with LoRA adapters. Ablation modes (`--ablation no-image` and `--ablation no-spec`) enable controlled information removal for diagnosing what the model has learned.
 
 ## Usage
 
@@ -175,86 +302,47 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
-### Sample Dataset
-
-A pre-generated sample of 200 examples (~3,500 questions) is included in `dataset/`. This contains:
-
-- `dataset.jsonl` — one JSON record per example, each with the image path, full specification text, all question-answer pairs with reasoning chains, and metadata (rule complexity, annotation level, violation count, hole positions, rule parameters)
-- `images/` — 200 PNG technical drawings at varying annotation levels (full, partial, minimal)
-- `stats.json` — summary statistics showing the distribution across complexities, annotation levels, violation counts, and question types
-
-This sample is ready to use for fine-tuning or evaluation without running the pipeline. To regenerate or produce a larger dataset:
-
 ### Generate Dataset
 
 ```bash
-# Default: 200 examples in ./dataset/
-uv run python orchestrator.py
-
-# Custom
-uv run python orchestrator.py --num 500 --output ./my_dataset --seed 0
+uv run python orchestrator.py                              # Default: 200 examples
+uv run python orchestrator.py --num 500 --output ./my_data # Custom
 ```
 
-### Output Structure
+### Dataset Structure
 
 ```
-dataset/
-  dataset.jsonl      # All examples with QA pairs and metadata
-  stats.json         # Dataset statistics
-  images/
-    EX-0000.png
-    EX-0001.png
-    ...
+data/
+  train/
+    dataset.jsonl   # 2,769 training examples
+    images/         # PNG technical drawings
+  test/
+    dataset.jsonl   # 197 test examples
+    images/
 ```
 
-### JSONL Record Format
+## Design Decisions
 
-```json
-{
-  "example_id": "EX-0000",
-  "image": "images/EX-0000.png",
-  "spec_text": "SPEC-GP-672: Guide Plate GP-672 Design Requirements\n\nRule R1: ...",
-  "questions": [
-    {
-      "type": "per_component_compliance",
-      "question": "Does hole H1 comply with Rule R1?",
-      "answer": "Yes",
-      "reasoning": "H1 diameter is 8.1mm. Rule R1 specifies nominal 8.0 ± 0.3mm..."
-    }
-  ],
-  "metadata": {
-    "seed": 0,
-    "rule_complexity": "simple",
-    "annotation_level": "full",
-    "num_violations": 1,
-    "plate_width": 131.0,
-    "plate_height": 63.0,
-    "holes": [...],
-    "rules": [...]
-  }
-}
-```
+**Constructive sampling** guarantees exact control over the compliance state. Random placement leads to either mostly compliant or ambiguous multi-rule violations.
 
-## Known Limitations & Future Work
+**Three annotation levels** create a natural curriculum: full annotation teaches the reasoning pattern (OCR + logic), minimal annotation forces visual inference, and the same questions apply regardless.
 
-- **Spacing violations are underrepresented** (~5% of violations) due to geometric constraints in constructive placement. Improved from <1% by biasing placement toward plate interior, but still lower than other rule types.
-- **Visual fidelity is synthetic** — matplotlib drawings, not real CAD output. Transfer to real engineering documents is an open question.
-- **Linguistic diversity is limited** — template-based specs use the same sentence patterns. An LLM paraphrase step could add variety.
+**Exhaustive hole x rule questions** teach systematic compliance checking. A model trained on incomplete checks would learn to be incomplete.
+
+**Annotation-aware reasoning chains** ensure training data matches what the model can see. Full annotation chains cite exact values; minimal annotation chains reference the scale bar and approximate values. However, we discovered that full annotation chains leak ground truth coordinates from the data pipeline, which may teach coordinate hallucination rather than genuine visual extraction (see Analysis section).
 
 ## Development
-
-### Package Management
-
-Uses `uv` with `pyproject.toml` for dependency management.
 
 ### Code Quality
 
 - **Language:** Python 3.12
 - **Type hints:** All functions have comprehensive type annotations
-- **Type checking:** Passes `pyright` in basic mode with 0 errors, 0 warnings
-- **Dependencies:** numpy, matplotlib
+- **Dependencies:** numpy, matplotlib, torch, transformers, peft, trl, bitsandbytes
 
-```bash
-# Verify type checking
-uv run pyright sampler.py spec_generator.py question_generator.py renderer.py orchestrator.py evaluate.py
-```
+### GPU Requirements
+
+- Training and evaluation require A100 80GB (or A800 80GB)
+- Model loads with `FineGrainedFP8Config()` which auto-dequantizes to bf16 on compute capability 8.0
+- **Do not use Blackwell/RTX PRO GPUs**: FP8 stays native on compute capability 9.0+, causing LoRA math to fail
+- **Do not strip FP8 config with `delattr`**: produces garbage weights
+- Batch size 1, gradient accumulation 8, max sequence length 4096
