@@ -1,0 +1,166 @@
+{
+  "num_predictions": 699,
+  "compliance": {
+    "overall": {
+      "correct": 393,
+      "total": 510,
+      "unparseable": 0
+    },
+    "by_annotation": {
+      "minimal": {
+        "correct": 87,
+        "total": 129
+      },
+      "partial": {
+        "correct": 168,
+        "total": 208
+      },
+      "full": {
+        "correct": 138,
+        "total": 173
+      }
+    },
+    "by_complexity": {
+      "simple": {
+        "correct": 114,
+        "total": 162
+      },
+      "multi_rule": {
+        "correct": 67,
+        "total": 88
+      },
+      "conditional": {
+        "correct": 212,
+        "total": 260
+      }
+    },
+    "by_rule_type": {},
+    "by_ground_truth": {
+      "Yes": {
+        "correct": 373,
+        "total": 457
+      },
+      "No": {
+        "correct": 20,
+        "total": 53
+      }
+    }
+  },
+  "measurements": {
+    "overall": {
+      "mae": 18.44,
+      "count": 120,
+      "unparseable": 0
+    },
+    "by_annotation": {
+      "minimal": {
+        "mae": 17.16,
+        "count": 28
+      },
+      "partial": {
+        "mae": 15.91,
+        "count": 48
+      },
+      "full": {
+        "mae": 22.01,
+        "count": 44
+      }
+    },
+    "by_type": {
+      "measurement_diameter": {
+        "mae": 2.25,
+        "count": 30
+      },
+      "measurement_edge_distance": {
+        "mae": 5.21,
+        "count": 30
+      },
+      "measurement_hole_to_hole": {
+        "mae": 30.91,
+        "count": 30
+      },
+      "measurement_plate_dims": {
+        "mae": 35.38,
+        "count": 30
+      }
+    }
+  },
+  "audit": {
+    "precision": 0.111,
+    "recall": 0.294,
+    "f1": 0.106,
+    "count": 30,
+    "unparseable": 0
+  },
+  "counterfactual": {
+    "overall": {
+      "mae": 0.7,
+      "count": 21,
+      "unparseable": 4
+    },
+    "by_annotation": {
+      "minimal": {
+        "mae": 0.19,
+        "count": 5
+      },
+      "partial": {
+        "mae": 1.54,
+        "count": 8
+      },
+      "full": {
+        "mae": 0.17,
+        "count": 8
+      }
+    }
+  },
+  "rule_selection": {
+    "correct": 7,
+    "total": 7,
+    "unparseable": 0,
+    "accuracy": 1.0
+  },
+  "grid": {
+    "full": {
+      "simple": {
+        "correct": 37,
+        "total": 45
+      },
+      "multi_rule": {
+        "correct": 9,
+        "total": 12
+      },
+      "conditional": {
+        "correct": 92,
+        "total": 116
+      }
+    },
+    "partial": {
+      "simple": {
+        "correct": 17,
+        "total": 24
+      },
+      "multi_rule": {
+        "correct": 46,
+        "total": 60
+      },
+      "conditional": {
+        "correct": 105,
+        "total": 124
+      }
+    },
+    "minimal": {
+      "simple": {
+        "correct": 60,
+        "total": 93
+      },
+      "multi_rule": {
+        "correct": 12,
+        "total": 16
+      },
+      "conditional": {
+        "correct": 15,
+        "total": 20
+      }
+    }
+  }
+}
