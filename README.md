@@ -4,11 +4,18 @@
 
 ---
 
-A synthetic data generation and finetuning pipeline for improving vision-language model performance on engineering design compliance checking. The project demonstrates that SFT on targeted synthetic data produces genuine but shallow cross-modal reasoning: Ministral 3 8B goes from 51.8% to 87.5% balanced accuracy on compliance checking, with measurement extraction error dropping from 8.14mm to 2.84mm. Ablation studies confirm the model uses both image and specification inputs, but reveal that its visual reasoning is limited to label reading and coarse spatial estimation.
+A synthetic data generation and finetuning pipeline for improving vision-language model performance on engineering design compliance checking. The synthetic data is carefully crafted with two independent difficulty axes to pinpoint the exact failure modes of VLMs: whether they fail at visual spatial inference, multi-modal reasoning, or both. The project demonstrates that SFT on targeted synthetic data produces genuine but shallow cross-modal reasoning: Ministral 3 8B goes from 51.8% to 87.5% balanced accuracy on compliance checking, with measurement extraction error dropping from 8.14mm to 2.84mm. Ablation studies confirm the model uses both image and specification inputs, but reveal that its visual reasoning is limited to label reading and coarse spatial estimation.
+
+### Key Findings
+
+1. **SFT works.** Balanced accuracy 51.8% to 87.5%, measurement MAE 8.14mm to 2.84mm, on 250 training examples with LoRA.
+2. **Cross-modal reasoning is genuine.** Ablation: violation detection drops from 82.8% to 37.7% without images, to 41.5% without spec. Both modalities are required.
+3. **But visual reasoning is shallow.** The model reads dimension labels (OCR), not spatial structure. At minimal annotation (no labels), it falls back to text priors from the spec rather than measuring from the image.
+4. **Spatial acuity is the bottleneck.** Measurement faithfulness analysis shows the model can measure large features (plate dimensions: 0.0mm error) but not spatial relationships (hole-to-hole: 8.5mm error). This points to RL as a logical next step.
 
 The pipeline generates technical drawings of mechanical plates with holes, paired with specification documents and exhaustive question-answer sets with step-by-step reasoning chains. Two controllable difficulty axes (annotation density and rule complexity) enable both curriculum training and diagnostic evaluation.
 
-## Motivation
+## Motivation and Strategy
 
 Current VLMs struggle with cross-modal reasoning on engineering documents, requiring models to extract rules from text specifications and apply them to visual diagrams. DesignQA showed that even GPT-4o and LLaVA perform poorly on compliance checking tasks.
 
@@ -44,7 +51,7 @@ Balanced accuracy (average of Yes and No accuracy) is the primary metric because
 
 ### Baseline: Ministral 8B (197 test examples, 3,418 compliance questions)
 
-The base model exhibits extreme "No" bias, predicting non-compliance for virtually everything (98.3% No accuracy, 5.3% Yes accuracy). Despite this, it extracts measurements reasonably well (diameter MAE 0.42mm), suggesting the bottleneck is reasoning, not vision.
+The base model exhibits extreme "No" bias, predicting non-compliance for virtually everything (98.3% No accuracy, 5.3% Yes accuracy). Despite this, it extracts measurements reasonably well (diameter MAE 0.42mm at full annotation), suggesting the initial bottleneck is reasoning, not vision. After finetuning resolves the reasoning bottleneck, spatial measurement emerges as the remaining limitation (see Analysis section).
 
 **3x3 Grid (annotation x complexity):**
 
@@ -87,7 +94,7 @@ Spatial measurements (edge distance, hole-to-hole) improved substantially but ho
 |-----------|-------|---------|---------|
 | Overall   | 1.69mm | 3.84mm | 3.81mm |
 
-The annotation gradient is clearly visible in measurements: the model is measurably worse at extracting numbers when labels are absent. This gradient is hidden in the compliance metric because the binary Yes/No decision is tolerant of measurement error -- you can get the measurement somewhat wrong and still get the compliance answer right, especially when 90% of answers are Yes.
+The annotation gradient is clearly visible in measurements: the model is measurably worse at extracting numbers when labels are absent. This gradient is hidden in the compliance metric because the binary Yes/No decision is tolerant of measurement error. You can get the measurement somewhat wrong and still get the compliance answer right, especially when 90% of answers are Yes.
 
 ## Ablation Studies
 
@@ -197,7 +204,11 @@ The original hypotheses for the missing gradient:
 - **H2 (Text-only shortcut): Rejected.** The ablation shows removing images drops balanced accuracy by 27.8 points. The model genuinely uses images.
 - **H3 (Saturated difficulty): Partially confirmed.** The clean matplotlib drawings are easy enough that the model can read labels with high accuracy regardless of annotation level. The model's visual reasoning is real but limited to coarse spatial features.
 
-The full picture is a combination: the model uses genuine cross-modal reasoning (rejecting H2), but the reasoning is shallow -- it consists of label reading at full annotation and coarse spatial estimation at minimal, rather than precise spatial measurement. SFT teaches the easiest pathway present in the training data.
+The full picture is a combination: the model uses genuine cross-modal reasoning (rejecting H2), but the reasoning is shallow. It consists of label reading at full annotation and coarse spatial estimation at minimal, rather than precise spatial measurement. SFT teaches the easiest pathway present in the training data.
+
+## Conclusion
+
+SFT on synthetic data produces genuine cross-modal reasoning for engineering compliance checking, raising balanced accuracy from 51.8% to 87.5%. Ablation studies confirm the model requires both the technical drawing and specification text, with violation detection collapsing without either modality. However, deeper analysis reveals the model's visual skills are limited to label reading and coarse spatial estimation; it cannot precisely measure spatial relationships (e.g. hole-to-hole distances) without explicit annotations, pointing to spatial acuity as the key bottleneck for future work.
 
 ## Known Limitations and Next Steps
 
